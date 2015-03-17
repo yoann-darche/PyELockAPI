@@ -1,4 +1,29 @@
-__author__ = 'daryo01'
+# PyEMockLib: The Elektor E-Lock card API interface
+#
+# Copyright (C) 2015 Yoann Darche <yoannd AT hotmail DOT com>
+#
+# This software is provided 'as-is', without any express or implied
+# warranty.  In no event will the authors be held liable for any damages
+# arising from the use of this software.
+#
+# Permission is granted to anyone to use this software for any purpose,
+# including commercial applications, and to alter it and redistribute it
+# freely, subject to the following restrictions:
+#
+# 1. The origin of this software must not be misrepresented; you must not
+#    claim that you wrote the original software. If you use this software
+#    in a product, an acknowledgment in the product documentation would be
+#    appreciated but is not required.
+# 2. Altered source versions must be plainly marked as such, and must not be
+#    misrepresented as being the original software.
+# 3. This notice may not be removed or altered from any source distribution.
+#
+# ELock card has been presented in the Elektor Magazine in April 2014
+# More detail here :
+#       http://www.elektor-labs.com/project/elektor-chip-e-lock-reference-project-130499130280.13916.html
+#   and http://www.elektor.com/130280-91
+
+__author__ = 'yoannd'
 
 import socket
 import ssl
@@ -96,13 +121,15 @@ class PyELockMsg:
 
         msg =       "PyElockMsg   : Len[{0:#x}]({0}) Status[{1:#x}]:{2}\n".format(self.Size, self.RetCode, self.getRetCodeStr())
         msg = msg + "   Cmd       : {0:#x}\n".format(self.Cmd)
-        msg = msg + "   DEV.TYPE  : {0:08b} [0x{1:02x}]\n".format(self.DevType, self.DevType)
-        msg = msg + "   NUM.DEVICE: {0:08b} [0x{1:02x}]\n".format(self.NumDev, self.NumDev)
+        msg = msg + "   DEV.TYPE  : [0x{1:02x}] {0:08b}\n".format(self.DevType, self.DevType)
+        msg = msg + "   NUM.DEVICE: [0x{1:04x}] {0:032b}\n".format(self.NumDev, self.NumDev)
 
-        if not(self.ExtMsg is None):
-            msg = msg + "   Extent Raw Data:\n"
-            for l in self.ExtMsg.split(b'\x00'):
-                msg = msg + " >> " + str(l) + "\n"
+        #if not(self.ExtMsg is None):
+        #    msg = msg + "   Extent Raw Data:\n"
+        #    for l in self.ExtMsg.split(b'\x00'):
+        #        msg = msg + " >> " + str(l) + "\n"
+
+        msg = msg + "   Extent Raw Data:\n{0}".format(self.ExtMsg)
 
         return msg
 
@@ -112,13 +139,23 @@ class PyELockMsg:
     def __bytes__(self):
         return self.RawMsg
 
+    def __bool__(self):
+        return self.RetCode == 0x00
+
     def encode(self):
 
-        msg = bytearray([0, 0x00, self.Cmd & 0x0FF, self.DevType & 0x0FF, self.NumDev & 0x0FF000000, self.NumDev & 0x0FF0000, self.NumDev & 0x0FF00, self.NumDev & 0x0FF])
-        self.Size = len(msg)
-        msg[0] = len(msg)
+        # Generating the Header
+        t = bytearray([0, 0x00, self.Cmd & 0x0FF, self.DevType & 0x0FF, self.NumDev & 0x0FF000000, self.NumDev & 0x0FF0000, self.NumDev & 0x0FF00, self.NumDev & 0x0FF])
 
-        self.RawMsg = bytearray(msg)
+        # if any Extended data exist, add them to the message
+        if self.ExtMsg is not None:
+            self.RawMsg = t + self.ExtMsg
+        else:
+            self.RawMsg = t
+
+        self.Size = len(self.RawMsg)
+        self.RawMsg[0] = self.Size
+
 
     def decode(self):
 
@@ -126,12 +163,31 @@ class PyELockMsg:
         self.RetCode = self.RawMsg[1]
         self.Cmd = self.RawMsg[2]
         self.DevType = self.RawMsg[3]
-        self.NumDev = self.RawMsg[7] << 24 + self.RawMsg[6] << 16 + self.RawMsg[5] << 8 + self.RawMsg[4]
+        self.NumDev = (self.RawMsg[4] << 24) + (self.RawMsg[5] << 16) + (self.RawMsg[6] << 8) + self.RawMsg[7]
+
 
         if self.Size > 8:
             self.ExtMsg = self.RawMsg[8:]
         else:
             self.ExtMsg = None
+
+    def setxdata(self, data):
+        """
+        This function permit to add Data to the message, generally required to configure, set the state etc..
+        :param data: bytearray containning extended data
+        :return: True/False
+        """
+
+        if type(data) == bytearray:
+            self.ExtMsg = data
+            self.encode()
+        else:
+            raise TypeError('Bad type passed to PyELockMsg:setxdata')
+            return False
+
+        return True
+
+
 
     def getbytearray(self):
         return self.RawMsg
@@ -175,16 +231,7 @@ class PyELockMsg:
         elif self.RetCode == 0xA1:
             return "ELock:ADC ADC not complete conversion"
 
-
         return "PyELock : Unknown error"
-
-
-
-class PyELockRelayMsg(PyELockMsg):
-
-      def __init__(self, Cmd=0, DevType=PYELOCK_DEV_NODEVICE, NumDev=0, raw=None):
-        pass
-
 
 
 class PyELock:
@@ -197,13 +244,14 @@ class PyELock:
     _setTempCfg = False
 
 
-    def __init__(self, host, port=None, TLSClientKeyFile=None, TLSClientCertFile=None):
+    def __init__(self, host, port=None, TLSClientKeyFile=None, TLSClientCertFile=None, TLSCaCert=None):
         self._host = host
         if port is not None:
             self._port = port
 
         self._TLSCertFile= TLSClientCertFile
         self._TLSKeyFile = TLSClientKeyFile
+        self._TLSCaCert  = TLSCaCert
 
 
     def connect(self):
@@ -221,7 +269,7 @@ class PyELock:
 
         # add the TLS layer
         self.cnx = ssl.wrap_socket(sck,  keyfile=self._TLSKeyFile, certfile=self._TLSCertFile, cert_reqs=ssl.CERT_OPTIONAL,
-                                   ssl_version=ssl.PROTOCOL_TLSv1_2, ca_certs='./cacert.pem')
+                                   ssl_version=ssl.PROTOCOL_TLSv1_2, ca_certs=self._TLSCaCert)
 
     def disconnect(self):
 
@@ -239,10 +287,12 @@ class PyELock:
     def _readAnswer(self):
 
         if self.cnx is None:
-            return None
+            raise ConnectionError("PyELock::_readAnswer: Not connected to ELock card !")
 
+        # get the len of the answer
         len = self.cnx.recv(1)
 
+        # read the answer
         return PyELockMsg(raw=bytearray([len[0]] + list(self.cnx.recv(len[0]-1))))
 
 
@@ -250,7 +300,7 @@ class PyELock:
     def getVersion(self):
 
         if self.cnx is None:
-            return False
+            raise ConnectionError("PyELock::getVersion: Not connected to ELock card !")
 
         msg = PyELockMsg(PYELOCK_CMD_SYS_GETVER, PYELOCK_DEV_NODEVICE, 0x00)
 
@@ -267,110 +317,124 @@ class PyELock:
         if (self.cnx is None) or ((self.cnx is None) and (self.cnx is None)):
             return False
 
-        devNum = 0x00
+        devnum = 0x00
 
         if relay1 is not None:
-            devNum = PYELOCK_DEVNUM_RELAY1
+            devnum = PYELOCK_DEVNUM_RELAY1
 
         if relay2 is not None:
-            devNum |= PYELOCK_DEVNUM_RELAY2
+            devnum |= PYELOCK_DEVNUM_RELAY2
+
+        msg = PyELockMsg(PYELOCK_CMD_WR_RELAY, PYELOCK_DEVTYPE_RELAY, devnum)
+
+        if relay1 != 0:
+            val = 0x01
+
+        if relay2 != 0:
+            val |= 0x02
+
+        val = bytearray([0x0, 0x0, 0x0, val])
+        msg.setxdata(val)
+
+        # print("Sended message : ", msg)
+        self.cnx.send(msg.getbytearray())
+
+        return self._readAnswer()
 
 
-        msg = PyELockMsg(PYELOCK_CMD_WR_RELAY, PYELOCK_DEVTYPE_RELAY, devNum)
 
-        msg.addRelayState(val)
+    def setTempCfg(self, sample_periode=1, hyst1=None, hyst2=None):
+        """
+        Set the configuration for Temperature sensor (Sample rate, Hysteresis}
+        Should be call at least one time before using getTempVal()
+
+        :param sample_periode: Period to scan the value of the temperature sensor 1 (s) - 86400 (24h)
+        :param hyst1: Hysteresis on Relay 1 { Low: <value>, 'High': <value>, 'Action': 0 (On) | 1 (Off) }
+        :param hyst2: Hysteresis on Relay 2 { Low: <value>, 'High': <value>, 'Action': 0 (On) | 1 (Off) }
+                <value> should be between -40 and 100 (°c)
+        :return: answer: PyELockMsg
+        """
 
 
-        print(self.cnx.send(msg))
+        def __MakeHyst(v):
+
+            r = int(v['High']).to_bytes(4, 'big', signed=True)
+            r += int(v['Low']).to_bytes(4, 'big', signed=True)
+            r += int(v['Action']).to_bytes(1, 'big', signed=False)
+            r += bytearray([0x0, 0x0, 0x0])
+            return(r)
 
 
-        return True
-
-    def setTempCfg(self):
-        msg = bytearray([0,
-                         0x00,  # ret code
-                         0x90,  # cmd
-                         0x08,  # DevType
-                         0x01, 0x00, 0x00, 0x00, # Device
-                         0x01,  # Type
-                         0x00, 0x00, 0x00, # Rsv[3]
-                         0x00, 0x00, 0x00, 0x00, # Sample Period
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, # hyst1
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  # hyst2
-                         ])
-
-        msg[0] = len(msg)
 
         if self.cnx is None:
-            return False
+            raise ConnectionError("PyELock::setTempCfg: Not connected to ELock card !")
 
-        print(self.cnx.send(msg))
+        msg = PyELockMsg(PYELOCK_CMD_SET_CFG_SENSOR, PYELOCK_DEVTYPE_TEMP_SENSOR, PYELOCK_DEVNUM_TEMP_SENSOR)
+        ext = bytearray([0x01, 0x00, 0x00, 0x00]) # Type = Temperature, 3 bytes reserved
+        ext += sample_periode.to_bytes(4, 'big', signed=False)
+
+        print(ext)
+
+        if hyst1 is None:
+            ext += int(0).to_bytes(12, 'big')
+        else:
+            ext += __MakeHyst(hyst1)
+
+        if hyst2 is None:
+            ext += int(0).to_bytes(12, 'big')
+        else:
+            ext += __MakeHyst(hyst2)
+
+        msg.setxdata(ext)
+
+        #print('Setup Temperature Msg:',msg)
 
         self._setTempCfg = True
+
+        self.cnx.send(msg.getbytearray())
+
+        return self._readAnswer()
 
 
     def getTempVal(self):
 
         if self.cnx is None:
-            return False
+            raise ConnectionError("PyELock::getTempVal: Not connected to ELock card !")
 
+        # if the temperature sensor is not yet configured, set default configuration
         if not self._setTempCfg:
-            self.setTempCfg()
+            self.setTempCfg(1, None, None)
 
-        msg = bytearray([0,
-                         0x00,  # RetCode
-                         0x98,  # cmd
-                         0x08,  # Device Type (I2C)
-                         0x01, 0x00, 0x00, 0x00 # Device
-                         ])
-
-        msg[0] = len(msg)
-
-        if self.cnx.send(msg) == msg[0]:
-            # read Client answer
-            ret = self.cnx.recv(msg[0])
-
-            if len(ret) > 0:
-                for i in ret:
-                    print(i)
+        msg = PyELockMsg(PYELOCK_CMD_RD_SENSOR, PYELOCK_DEVTYPE_TEMP_SENSOR, PYELOCK_DEVNUM_TEMP_SENSOR)
 
 
+        self.cnx.send(msg.getbytearray())
 
+        ret = self._readAnswer()
 
-
-# void set_relays(int relay1, int relay2)
-# {
-#     unsigned int Action = 0x00000000;
-#     s_SetRelay TxSetRelay;
-#
-#     if (relay1!=0) Action |= 0x00000001;
-#     if (relay2!=0) Action |= 0x00000002;
-#
-#     TxSetRelay.Nb = sizeof(s_SetRelay);
-#     TxSetRelay.RetCode = 0x00;
-#     TxSetRelay.Cmd = 0x9c;
-#     TxSetRelay.DevType = 0x02;
-#     TxSetRelay.Device = SWAP32(0x00000003);
-#     TxSetRelay.Action = SWAP32(Action);
-#
-#     if (TcpClientSend((unsigned char *)&TxSetRelay,TxSetRelay.Nb)!=TCPCLIENT_OK)
-#     {
-#         printf("Set relay error.\n");
-#     }
-#
-#     print_data((unsigned char *)&TxSetRelay,TxSetRelay.Nb,1);
-# }
-
+        # make conversion if we get a result, other wise None
+        if ret:
+            return int.from_bytes(ret.ExtMsg, 'big', signed=True)
+        else:
+            return None
 
 
 # Main Program entry
 
 if __name__ == "__main__":
 
+    print("*******************************************************")
+    print("*   Basic Test script V1.00 (cc) Yoann Darche 2015    *")
+    print("*-----------------------------------------------------*")
+    print("* The script expect to access to the following files: *")
+    print("*  ./ISLclient-cert.pem : Client certificate          *")
+    print("*  ./ISLclient-key.pem  : Client key                  *")
+    print("*  ./cacert.pem         : CA certificate              *")
+    print("*******************************************************\n\n")
 
     print("Creating the PyELock Object :")
 
-    elock = PyELock('192.168.20.21',2013, TLSClientCertFile='./ISLclient-cert.pem', TLSClientKeyFile='./ISLclient-key.pem')
+    elock = PyELock('192.168.20.21',2013, TLSClientCertFile='./ISLclient-cert.pem', TLSClientKeyFile='./ISLclient-key.pem', TLSCaCert='./cacert.pem')
 
     print("Connecting to the ELock card....")
     elock.connect()
@@ -381,14 +445,21 @@ if __name__ == "__main__":
     print(v)
     print(v.RawMsg)
 
-    #input("Press enter to activate Relay 2")
-
-    #elock.setRelays(0, 1)
+    # input("Press enter to activate Relay 2")
+    #print(elock.setRelays(None, 0))
 
     #input("Press enter to unactivate Relay 2")
+    #print(elock.setRelays(None, 1))
 
-    #elock.setRelays(0, 0)
+    print("Temparture configuartion sesnsor")
+    print(elock.setTempCfg(1, None, None))
+
+    e = ''
+    while e != 'q' and e != 'Q':
+        print("Temperature : ", elock.getTempVal())
+        e = input("(Q)uit ?")
 
 
+    print("Disconnecting from ELock card...")
     elock.disconnect()
 
