@@ -2,7 +2,7 @@
 
 __author__ = 'daryo01'
 
-import PyELockApi.pyELockAPI.api as el
+import pyELockAPI as el
 
 if __name__ == "__main__":
 
